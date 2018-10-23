@@ -249,12 +249,32 @@ keep stkcd year f101001a f101002a indcd
 compress
 save FI_T10, replace
 *-------------------------------------------------------*
+*- 产权性质
+*-------------------------------------------------------*
+insheet using EN_EquityNatureAll.txt, clear
+
+rename symbol stkcd
+gen date = date(enddate, "YMD")
+format date %td
+gen year = year(date)
+sort stkcd year
+
+keep stkcd year largestholderrate toptenholdersrate
+
+save EN_EquityNatureAll, replace
+*-------------------------------------------------------*
 *- 年报公布日期
 *-------------------------------------------------------*
 insheet using FAR_Finidx.txt, clear
 
 label var annodt "年报公布日期"
 keep stkcd accper annodt
+gen date = date(accper, "YMD")
+format date %td
+gen year = year(date)
+*egen tag = tag(stkcd year)
+*tab tag
+drop date
 
 compress
 save FAR_Finidx, replace
@@ -617,8 +637,8 @@ drop if dif1 == 1
 drop if dif2 == 2
 
 keep ReportID stkcd ReportDate declaredate Num_Q ///
-	researchernum institutionnum individualnum ///
-	MeetingWay Researcher Address Participants
+	researchernum institutionnum individualnum
+*	MeetingWay Researcher Address Participants
 compress
 save Data, replace
 
@@ -630,6 +650,61 @@ cap erase tradeday_tempo.dta
 cap erase tradeday_tempo1.dta
 cap erase tradeday_tempo2.dta
 cap erase tradeday_tempo3.dta
+*-------------------------------------------------------*
+*- 调研问题
+*-------------------------------------------------------*
+insheet using Que_Risk.csv, clear
+
+bysort reportid: egen maxq = max(rank)
+*问题&回答字数
+bysort reportid: egen question_count = sum(question_len)
+bysort reportid: egen answer_count = sum(answer_len)
+/*
+*风险关键词占比
+*报告级别上风险关键词长度
+bysort reportid: egen finan_len_report = sum(finan_len)
+bysort reportid: egen ido_len_report = sum(ido_len)
+bysort reportid: egen sys_len_report = sum(sys_len)
+bysort reportid: egen lg_rg_len_report = sum(lg_rg_len)
+bysort reportid: egen tax_len_report = sum(tax_len)
+bysort reportid: gen total_len_report = finan_len_report+ ///
+ido_len_report+sys_len_report+lg_rg_len_report+tax_len_report
+*报告级别上风险关键词比例
+bysort reportid: gen finan = finan_len_report / question_count
+bysort reportid: gen ido = ido_len_report / question_count
+bysort reportid: gen sys = sys_len_report / question_count
+bysort reportid: gen lg_rg = lg_rg_len_report / question_count
+bysort reportid: gen tax = tax_len_report / question_count
+bysort reportid: gen total_risk = total_len_report / question_count
+rename symbol stkcd
+keep reportid stkcd reportdate question_count answer_count ///
+finan ido sys lg_rg tax total_risk
+duplicates drop
+*histogram total_risk, normal
+*/
+sort symbol reportid rank
+
+save Que_Risk, replace
+*-------------------------------------------------------*
+*- 调研回答
+*-------------------------------------------------------*
+insheet using Ans_Final.csv, clear
+
+replace senti = -1 if senti == 0
+replace senti = 0 if senti == 1
+replace senti = 1 if senti == 2
+
+*报告层面的态度
+bysort reportid: egen maxq = max(rank)
+bysort reportid: gen senti_eq = senti_ans / maxq
+bysort reportid: egen senti = sum(senti_eq)
+
+rename symbol stkcd
+keep reportid stkcd reportdate senti
+duplicates drop
+*histogram senti, normal
+
+save Ans_Final, replace
 *-------------------------------------------------------*
 *- 观察调研事件时间分布情况
 *-------------------------------------------------------*
@@ -676,10 +751,12 @@ restore
 use FS_Combas, clear
 
 merge 1:1 stkcd year using FS_Comins
-keep if _merge == 3
 drop _merge
 merge 1:1 stkcd year using FI_T10
-keep if _merge == 3
+drop _merge
+merge 1:1 stkcd year using FAR_Finidx
+drop _merge
+merge 1:1 stkcd year using EN_EquityNatureAll
 drop _merge
 
 save Basic_Data, replace
@@ -696,12 +773,28 @@ label var LEV "资产负债率"
 gen ROA = b002000101/a001000000
 label var ROA "总资产净利润"
 generate LOSS =cond(b002000000<0,1,0)
-label var LOSS "1,亏损；0，非亏损"
+label var LOSS "1,亏损；0,非亏损"
 gen MB_A = f101001a
 label var MB_A "账面市值比a"
 gen MB_B = f101002a
 label var MB_B "账面市值比b"
+gen INDC = cond(substr(indcd,1,1) == "C", substr(indcd,1,2), substr(indcd,1,1))
+label var INDC "行业码"
+gen INDC1 = cond(INDC=="C3",substr(indcd,1,3),INDC)
+gen INDC2 = cond(INDC=="C2",substr(indcd,1,3),INDC1)
+replace INDC = INDC2
+gen GRW = D.b001101000/L.b001101000
+label var GRW "营收增长率"
+gen TOP1 = largestholderrate/100
+label var TOP1 "第一大股东持股比例"
+/*
+"股价波动性VOLATILITY"
+"与会分析师人数ANALYST"
+"公布日与调研日间隔天数HORIZON"
+*/
+keep stkcd year SIZE LEV ROA GRW TOP1 LOSS MB_A MB_B INDC annodt
 
+save Basic_Final, replace
 *-------------------------------------------------------*
 *- 分市场CAR & VOl
 *-------------------------------------------------------*
@@ -799,45 +892,167 @@ reg Car_OS_Win2_date if dif == 0, robust
 reg Car_OS_Win2_date if dif == 1, robust
 */
 *- VOL
-bysort group_id: egen VOL_OS = sd(AR_OS) if (dif<=-2 & dif>=-21)	//[-1,1]窗口期前20个交易日波动性
-bysort group_id: egen VOL_TL = sd(AR_TL) if (dif<=-2 & dif>=-21)
+bysort group_id: egen VOL_OS_win1 = sd(AR_OS) if (dif<=-2 & dif>=-21)	//[-1,1]窗口期前20个交易日波动性
+bysort group_id: egen VOL_TL_win1 = sd(AR_TL) if (dif<=-2 & dif>=-21)
 
+bysort group_id: replace VOL_OS_win1 = VOL_OS_win1[_n-2] if declaredate==trddt
+bysort group_id: replace VOL_TL_win1 = VOL_TL_win1[_n-2] if declaredate==trddt
+
+bysort group_id: egen VOL_OS_win2 = sd(AR_OS) if (dif<=-1 & dif>=-20)	//[0,1]窗口期前20个交易日波动性
+bysort group_id: egen VOL_TL_win2 = sd(AR_TL) if (dif<=-1 & dif>=-20)
+
+bysort group_id: replace VOL_OS_win2 = VOL_OS_win2[_n-1] if declaredate==trddt
+bysort group_id: replace VOL_TL_win2 = VOL_TL_win2[_n-1] if declaredate==trddt
+
+bysort group_id: keep if declaredate==trddt
+
+keep stkcd declaredate Car_OS_Win1 Car_TL_Win1 VOL_OS_win1 VOL_TL_win1 ///
+						Car_OS_Win2 Car_TL_Win2 VOL_OS_win2 VOL_TL_win2
+save Car_Final, replace
+*-------------------------------------------------------*
+*- 所有数据合并
+*-------------------------------------------------------*
+use Data, clear
+
+rename ReportID reportid
+rename ReportDate reportdate
+gen date = date(declaredate, "YMD")
+format date %td
+gen year = year(date)
+drop date
+
+merge 1:1 reportid using Que_Risk
+keep if _merge == 3
+drop _merge
+merge 1:1 reportid using Ans_Final
+keep if _merge == 3
+drop _merge
+merge 1:1 stkcd declaredate using Car_Final
+*000564被剔除，其公告发布日在交易日，而下一个交易日即开始停牌
+keep if _merge == 3
+drop _merge
+save tempo1, replace
+
+use tempo1, clear
+keep stkcd declaredate
+sort stkcd
+by stkcd: gen eventcount = _N
+by stkcd: keep if _n == 1
+keep stkcd eventcount
+save eventcount, replace
+
+use Basic_Final, clear
+sort stkcd year
+merge m:1 stkcd using eventcount
+keep if _merge == 3	//没有合并成功的表明该公司未被调研过
+drop _merge
+expand eventcount
+drop eventcount
+sort stkcd year
+by stkcd year: gen set = _n
+sort stkcd set
+save BasicData, replace
+
+use tempo1, clear
+sort stkcd year
+by stkcd: gen set = _n
+sort stkcd set
+save tempo2, replace
+
+use BasicData, clear
+merge m:1 stkcd set using tempo2
+keep if _merge == 3
+drop _merge
+sort stkcd set year
+drop set
+
+save final, replace
+cap erase tempo1.dta
+cap erase tempo2.dta
+cap erase eventcount.dta
+cap erase BasicData.dta
+*-------------------------------------------------------*
+*- 数据处理
+*-------------------------------------------------------*
+use final, clear
+
+gen date = date(declaredate, "YMD")
+format date %td
+gen year_dec = year(date)
+gen dif = year_dec - year
+keep if dif == 1
+*428个样本被剔除(上市当年被调研缺失上年数据)
+drop date
+drop year_dec
+drop dif
+
+drop if INDC == "I"
+*1533个金融企业样本被剔除
+
+drop if (LEV<0 | LEV>1)
+*3个资产负债率不在[0,1]范围的样本被剔除
+
+egen hmiss = rowmiss(SIZE LEV ROA TOP1 LOSS GRW MB_A MB_B INDC)
+drop if hmiss != 0
+drop hmiss
+*1839个控制变量有缺失的样本被剔除
+
+drop year //year代表控制变量年份
+drop annodt //先不剔除年报、季报窗口期内样本
+gen date = date(declaredate, "YMD")
+format date %td
+gen year = year(date) //调研公布日所在年份
+drop date
+order stkcd year
+sort stkcd year
+
+gen TRisk_Senti = total_risk*senti
+gen Finan_Senti = finan*senti
+gen Ido_Senti = ido*senti
+gen Sys_Senti = sys*senti
+gen Lgrg_Senti = lg_rg*senti
+gen Tax_Senti = tax*senti
+rename finan Finan
+rename ido Ido
+rename sys Sys
+rename lg_rg Lgrg
+rename tax Tax
+rename senti Senti
+rename total_risk TRisk
+
+replace question_count = question_count/100
+replace answer_count = answer_count/100
+
+global FMVar1 "SIZE LEV ROA GRW TOP1 MB_A"
+global FMVar2 "SIZE LEV ROA GRW TOP1 MB_B"
+
+global CVar "question_count answer_count researchernum LOSS"
+
+global YVar1 "Car_OS_Win1"
+global XVar1 "VOL_OS_win1"
+global YVar2 "Car_OS_Win2"
+global XVar2 "VOL_OS_win2"
+
+global YVar3 "Car_TL_Win1"
+global XVar3 "VOL_TL_win1"
+global YVar4 "Car_TL_Win2"
+global XVar4 "VOL_TL_win2"
+
+global MVar1 "TRisk Senti TRisk_Senti"
+global MVar2 "Finan Ido Sys Lgrg Tax Senti Finan_Senti Ido_Senti Sys_Senti Lgrg_Senti Tax_Senti"
+
+winsor2 $FMVar1 MB_B, replace cuts(1 99)
+winsor2 $YVar1 $XVar1 $YVar2 $XVar2, replace cuts(1 99)
+winsor2 $YVar3 $XVar3 $YVar4 $XVar4, replace cuts(1 99)
+winsor2 $MVar2 TRisk TRisk_Senti, replace cuts(1 99)
+
+tabstat $FMVar1, statistics( count mean median sd min max skewness kurtosis) long columns(statistics) format(%9.3f)
+
+local ovars1 "$YVar4 $MVar1"
+local cols = wordcount( "`ovars1'")
+pwcorr_a `ovars1', star1(0.01) star5(0.05) star10(0.1)
+
+save final, replace
+*-------------------------------------------------------*
 
 *-------------------------------------------------------*
-*-------------------------------------------------------*
-*-------------------------------------------------------*
-*-------------------------------------------------------*
-cd "F:\AnnouncementText"
-/*
-unicode analyze NTUSD1.csv
-unicode encoding set gb18030
-unicode translate NTUSD1.csv
-*/
-insheet using NTUSD1.csv, clear
-foreach x of varlist * {
-			label var `x' `"`=`x'[1]'"'
-		}
-drop in 1/3
-drop v1
-split v6, generate(Emotion) parse(,) destring
-split Emotion1, generate(P) parse("(") destring
-split Emotion3, generate(F) parse(")") destring
-rename Emotion2 Neg 
-rename P2 Pos
-rename F1 Emo
-drop Emotion1 Emotion3 P1
-order v2-v6 Pos Neg Emo
-foreach x of varlist * {
-			cap destring `x', replace
-		}
-gen Total = Pos + Neg
-
-bysort v2: egen Emo_A = sum(Emo)	//总体来说是积极的
-bysort v2: egen Total_A = sum(Total)
-
-gen Tone = Emo_A/Total_A
-
-keep v2 Tone
-duplicates drop
-
-hist Tone, normal
